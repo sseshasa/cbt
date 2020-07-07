@@ -6,6 +6,7 @@ import json
 import time
 import fioplotcommon as common
 import pandas as pd
+import numpy as np
 
 class Fiostatsparser():
   def __init__(self, ctx):
@@ -176,6 +177,7 @@ class Parsecsv(Fiostatsparser):
     self.subplot = ctx.subplot
     self.fiocsvfile = ctx.filename
     self.fiodataframe = []
+    self.fiopctdataframe = []
     self.parse_csv_data()
 
   def set_df_column_headers(self):
@@ -193,10 +195,6 @@ class Parsecsv(Fiostatsparser):
       sys.exit(1)
 
   def parse_csv_data(self):
-    if self.metric == 'pct':
-      print("'%s' metric not yet supported!" % self.metric)
-      sys.exit(1)
-
     with open(self.fiocsvfile, 'r') as csv_file:
       f_info = os.fstat(csv_file.fileno())
       if f_info.st_size == 0:
@@ -218,6 +216,9 @@ class Parsecsv(Fiostatsparser):
         self.fiodataframe[self.metric] = self.fiodataframe[self.metric] / self.MILLION
       if self.metric == 'bw':
         self.fiodataframe[self.metric] = (self.fiodataframe[self.metric] * self._4KBYTE) / (self.MBYTE)
+      if self.metric == 'pct':
+        self.fiodataframe['lat'] = self.fiodataframe[self.metric] / self.MILLION
+        self.generate_percentile_stats()
 
   def get_df_stats(self, getrange=False):
     if self.metric is None:
@@ -250,3 +251,39 @@ class Parsecsv(Fiostatsparser):
     mean = pd.Series([mean] * ((endrow - startrow) + 1))
 
     return mean, stdev, startrow, endrow
+
+  def generate_percentile_stats(self):
+    start_t = 0
+    end_t = 0
+    if self.timerange is not None and len(self.timerange):
+      start_t = float(self.timerange[0])
+      end_t = float(self.timerange[1])
+
+    # Find start row
+    if not end_t:
+      end_t = self.fiodataframe['time'][len(self.fiodataframe) - 1]
+
+    print("Calculating percentile[95, 99, 99.5] from start: %s to end: %s\n" % (start_t, end_t))
+    self.fiopctdataframe = pd.DataFrame({}, columns = ['time', 'samples', 'avg', '95th', '99th', '99.5th'])
+    delimiter = ', '
+    colheaders = delimiter.join(self.fiopctdataframe.columns.values.tolist())
+    print(colheaders)
+    # Start a loop that calculates percentile stats for
+    # each second between the desired time range.
+    for t in np.arange(start_t, (end_t - 1), 1.0):
+      start_r = self.fiodataframe.loc[self.fiodataframe['time'] >= t].index[0]
+      end_r = self.fiodataframe.loc[self.fiodataframe['time'] >= (t+1.0)].index[0]
+      tmp_df = self.fiodataframe.loc[start_r:end_r, 'lat'].sort_values()
+      # Find the percentile in the sorted range
+      pct_list = tmp_df.quantile([.95,.99,.995]).to_list()
+      mean = self.fiodataframe.loc[start_r:end_r, 'lat'].mean()
+      samples = "%d" % ((end_r - start_r) + 1)
+      pctdata = { 'time': t + 1, 'samples': samples, 'avg': mean,\
+                  '95th': pct_list[0], '99th': pct_list[1], '99.5th': pct_list[2] }
+      self.fiopctdataframe = self.fiopctdataframe.append(pctdata, ignore_index=True)
+      entry = self.fiopctdataframe.values[len(self.fiopctdataframe) - 1].tolist()
+      print(delimiter.join(str(e) for e in entry))
+    # Write to csv file
+    pct_csv_file = self.get_output_csv_filename()
+    self.fiopctdataframe.to_csv(pct_csv_file, index=None)
+    print("Created CSV percentile stats file: %s" % pct_csv_file)
